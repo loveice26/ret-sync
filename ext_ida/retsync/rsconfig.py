@@ -19,6 +19,9 @@
 
 import os
 import sys
+import locale
+import shutil
+import subprocess
 import tempfile
 import logging
 from logging.handlers import RotatingFileHandler
@@ -28,12 +31,6 @@ try:
     from ConfigParser import SafeConfigParser
 except ImportError:
     from configparser import ConfigParser as SafeConfigParser
-
-try:
-    import distutils.spawn
-    spawn_module = True
-except ImportError:
-    spawn_module = False
 
 
 # global plugin settings
@@ -172,11 +169,16 @@ def rs_debug(s):
 
 
 def rs_encode(buffer_str):
-    return buffer_str.encode(RS_ENCODING)
+    return buffer_str.encode(RS_ENCODING, errors='replace')
 
 
 def rs_decode(buffer_bytes):
-    return buffer_bytes.decode(RS_ENCODING)
+    try:
+        return buffer_bytes.decode(RS_ENCODING)
+    except UnicodeDecodeError:
+        pass
+    enc = locale.getpreferredencoding(False) or 'utf-8'
+    return buffer_bytes.decode(enc, errors='replace')
 
 
 # default global paths Windows platforms
@@ -185,7 +187,7 @@ PY_WIN_DEFAULTS = set(["C:\\Python27", "C:\\Python27-x64"])
 # default local/user paths Windows platforms
 PY_WIN_LOCAL_DEFAULTS = set()
 
-PY3_RELEASES = ["37", "38", "39", "310"]
+PY3_RELEASES = ["37", "38", "39", "310", "311", "312", "313", "314"]
 
 for py_rel in PY3_RELEASES:
     PY_WIN_DEFAULTS.add("C:\\Program Files\\Python%s" % py_rel)
@@ -200,9 +202,33 @@ PY_LINUX_DEFAULTS = ("/usr/bin",)
 
 # retsync plugin needs a Python interpreter to run broker and dispatcher
 def get_python_interpreter():
-    # when available, use spawn module to search through PATH
-    if spawn_module:
-        interpreter = distutils.spawn.find_executable('python')
+    # honour PYTHON_PATH environment variable if set
+    env_path = os.environ.get('PYTHON_PATH')
+    if env_path:
+        interpreter = os.path.realpath(os.path.normpath(env_path))
+        if os.path.exists(interpreter):
+            return interpreter
+        rs_log("Warning, PYTHON_PATH env var points to a non-existent file: \"%s\"\n" % env_path)
+
+    # on Windows, try py launcher first (follows system default Python)
+    if sys.platform == 'win32':
+        try:
+            result = subprocess.run(
+                ['py', '-3', '-c', 'import sys; print(sys.executable)'],
+                capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                interpreter = result.stdout.strip()
+                if interpreter and os.path.exists(interpreter):
+                    # discard Universal Windows Platform (UWP) directory
+                    parts = os.path.split(interpreter)
+                    if not (len(parts) > 1 and parts[-2].endswith('WindowsApps')):
+                        return interpreter
+        except (subprocess.SubprocessError, OSError):
+            pass
+
+    # search through PATH using shutil.which (replaces deprecated distutils.spawn)
+    for name in ('python', 'python3'):
+        interpreter = shutil.which(name)
         if interpreter:
             # discard Universal Windows Platform (UWP) directory
             parts = os.path.split(interpreter)
@@ -240,7 +266,8 @@ def get_python_interpreter():
             return interpreter
 
     rs_log("plugin initialization failed: Python interpreter not found\n"
-           "       please fix PYTHON_PATH/PYTHON_BIN in %s/rsconfig.py\n" % PLUGIN_DIR)
+           "       please fix PYTHON_PATH/PYTHON_BIN in %s/rsconfig.py\n"
+           "       Alternatively, set the PYTHON_PATH environment variable.\n" % PLUGIN_DIR)
 
     raise RuntimeError
 
